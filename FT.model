@@ -1,0 +1,84 @@
+library("bigmemory")
+library("biganalytics")
+library("foreach")
+library("doMC")
+library("lme4")
+## REQUIRES THE LOADING OF GLMER FROM SOURCE CODE
+
+registerDoMC(7)
+
+dir<- "/BLUPsByTrial/"
+files<- list.files(path=dir, pattern="_dfm.txt")
+for(i in seq_along(files)){
+  temp<- read.table(file=paste(dir,files[i],sep=""), header=T)
+  base<- strsplit(files[i], split="/")[[1]][1]
+  colnames(temp)[1]<- "taxa"
+  temp$trial<- strsplit(files[i], split="_")[[1]][1]
+  if(i==1){
+    allPhenos<- temp
+  }else{
+    allPhenos<- rbind(allPhenos,temp)
+  }
+}
+
+boxplot(allPhenos$dff~allPhenos$trial, main="SeeD Standardized DS", cex.axis=0.4)
+MDS_Covariates<-read.table("MDS_covariates.txt", header=F, skip=1)
+MDS_Covariates$taxa<-sapply(strsplit(as.character(MDS_Covariates$V1),split=":"), "[[", 1)
+allPhenosMDS<-merge(allPhenos,MDS_Covariates, by="taxa")
+
+allPhenosMDS$V2<- as.numeric(allPhenosMDS$V2)
+allPhenosMDS$V3<- as.numeric(allPhenosMDS$V3)
+allPhenosMDS$V4<- as.numeric(allPhenosMDS$V4)
+allPhenosMDS$V5<- as.numeric(allPhenosMDS$V5)
+allPhenosMDS$V6<- as.numeric(allPhenosMDS$V6)
+allPhenosMDS$V7<- as.numeric(allPhenosMDS$V7)
+allPhenosMDS$V8<- as.numeric(allPhenosMDS$V8)
+allPhenosMDS$V9<- as.numeric(allPhenosMDS$V9)
+allPhenosMDS$V10<- as.numeric(allPhenosMDS$V10)
+allPhenosMDS$V11<- as.numeric(allPhenosMDS$V11)
+allPhenosMDS$trial<-as.factor(allPhenosMDS$trial)
+
+passportFile<-"SeeDaccessionsAndHybrids.txt"
+SeeDpassport<- read.table(passportFile, header=F, sep="\t")
+names(SeeDpassport)<- c("taxa","hybrid")
+
+dim(allPhenosMDS)
+allPhenosMDSHybrid<- merge(allPhenosMDS, SeeDpassport, by="taxa")
+allPhenosMDSHybrid$hybrid<- as.factor(as.character(allPhenosMDSHybrid$hybrid))
+
+
+kinshipFile<- "AllZeaGBS_v2.7_SeeDBeagle4imp.sorted.MAF1pct.Sample30kSnps.uniqTaxa.normalNames.TaxaWithPheno.kinship.txt"
+kinship<- read.table(kinshipFile, skip=1,row.names=1,header=F)
+ID<-allPhenosMDSHybrid$taxa
+
+fm1 <- GLMER(dff~trial+hybrid+V2+V3+V4+V5+V6+V7+V8+V9+V10+V11+(1|ID),data=allPhenosMDSHybrid, KMat = list(ID = nearestPositiveD_Kinship$mat))
+
+residualsMLM<-data.frame(allPhenosMDSHybrid$taxa,residuals(fm1), allPhenosMDSHybrid$trial)
+colnames(residualsMLM)<- c("taxa", "residuals", "trial")
+
+singleMarkerTest <- function(marker, residuals){ 
+  SNP<- data.frame(taxa,marker)
+  colnames(SNP)[2]<-"Site"
+  phenoGeno<- merge(residuals,SNP, by="taxa")
+  pvalue<- anova(lm(residuals~trial/Site-trial, data=phenoGeno))$"Pr(>F)"[1]
+  return(pvalue)
+}
+
+numericSNPsDir<-"/Volumes/SeeD/SeeDFloweringGWAS/Genos/"
+files<-list.files(path=numericSNPsDir,pattern="gz.numerical.txt.gz$")
+chromosomes<-sub(pattern="[.]",replacement="",x=substr(files, start=13, stop=14))
+
+pvals<- NULL
+for(j in c(1:10)){
+  SNPsFile<- paste(numericSNPsDir,files[j], sep="")
+  chrom<- strsplit(SNPsFile,"/Volumes/SeeD/SeeDFloweringGWAS/Genos/AllZeaGBS_v2")
+  SNPs<- read.table(gzfile(SNPsFile), skip=3,sep="\t",row.names=1,header=F)
+  taxa<- sapply(strsplit(rownames(SNPs),split=":"), "[[", 1)
+  temp<- foreach(i=1:ncol(SNPs), .combine='rbind') %dopar%  singleMarkerTest(SNPs[,i],residualsMLM)
+  temp<-as.data.frame(temp)
+  temp$chr<-chromosomes[j]
+  outfile<-paste(numericSNPsDir,"SeeDModelFromResiduals_MLM_MDS.nestedModel.noChiapas.chr",chromosomes[j],".dff.pvals.txt", sep="")
+  write.table(temp,file=outfile, quote=F,row.names=F, col.names=T)
+}
+
+
